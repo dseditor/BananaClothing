@@ -4,7 +4,18 @@
 */
 import { GoogleGenAI, Modality, Type, GenerateContentResponse } from "@google/genai";
 
-const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
+// --- Helper Functions ---
+
+const getActiveAiClient = () => {
+    const isSecondaryKeyEnabled = localStorage.getItem('isSecondaryKeyEnabled') === 'true';
+    const secondaryApiKey = localStorage.getItem('secondaryApiKey');
+    const apiKey = (isSecondaryKeyEnabled && secondaryApiKey) ? secondaryApiKey : process.env.API_KEY;
+
+    if (!apiKey) {
+        throw new Error('No API Key is available. Please set your default key or a secondary key in settings.');
+    }
+    return new GoogleGenAI({ apiKey });
+};
 
 const dataUrlToPart = (dataUrl: string, isPng: boolean = false) => {
     const [meta, base64Data] = dataUrl.split(',');
@@ -15,25 +26,17 @@ const dataUrlToPart = (dataUrl: string, isPng: boolean = false) => {
 const extractBase64FromResponse = (response: GenerateContentResponse): string => {
     const candidate = response.candidates?.[0];
     if (!candidate) {
-        // Using Traditional Chinese for user-facing error.
         throw new Error("模型未返回有效回應。");
     }
-
-    // Check for image data first
     for (const part of candidate.content?.parts || []) {
         if (part.inlineData) {
             return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
         }
     }
-
-    // If no image, provide a more detailed error based on the finish reason.
     if (candidate.finishReason && candidate.finishReason !== 'STOP') {
         let errorMessage = `圖片生成失敗，原因：${candidate.finishReason}。`;
         if (candidate.finishReason === 'SAFETY') {
-            const blockedCategories = candidate.safetyRatings
-                ?.filter(r => r.blocked)
-                .map(r => r.category.replace('HARM_CATEGORY_', ''))
-                .join(', ');
+            const blockedCategories = candidate.safetyRatings?.filter(r => r.blocked).map(r => r.category.replace('HARM_CATEGORY_', '')).join(', ');
             errorMessage = `圖片生成失敗，因為內容可能違反了安全政策${blockedCategories ? ` (${blockedCategories})` : ''}。請嘗試調整您的圖片或描述。`;
         } else if (candidate.finishReason === 'RECITATION') {
              errorMessage = '圖片生成失敗，因為輸出內容與受版權保護的材料過於相似。';
@@ -42,12 +45,11 @@ const extractBase64FromResponse = (response: GenerateContentResponse): string =>
         }
         throw new Error(errorMessage);
     }
-    
-    // Fallback error if no image and no clear reason provided.
     throw new Error("回應中找不到圖片資料。");
 };
 
 const callImageEditModel = async (parts: any[], promptText: string): Promise<string> => {
+    const ai = getActiveAiClient();
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash-image-preview',
         contents: { parts: [...parts, { text: promptText }] },
@@ -56,9 +58,189 @@ const callImageEditModel = async (parts: any[], promptText: string): Promise<str
     return extractBase64FromResponse(response);
 };
 
-// --- Main App Functions ---
+// --- Fal.ai Integration ---
+
+const getFalApiKey = (): string | null => localStorage.getItem('fal_api_key');
+
+const pollFalResult = (statusUrl: string, apiKey: string): Promise<any> => {
+    return new Promise((resolve, reject) => {
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch(statusUrl, { headers: { 'Authorization': `Key ${apiKey}` } });
+                const data = await res.json();
+                if (data.status === 'completed') {
+                    clearInterval(interval);
+                    resolve(data);
+                } else if (data.status === 'failed' || data.status === 'error') {
+                    clearInterval(interval);
+                    reject(new Error(data.error || 'Fal.ai generation failed.'));
+                }
+            } catch (error) {
+                clearInterval(interval);
+                reject(error);
+            }
+        }, 2000); // Poll every 2 seconds
+    });
+};
+
+const fetchAndConvertToBase64 = async (imageUrl: string): Promise<string> => {
+    const response = await fetch(imageUrl);
+    if (!response.ok) throw new Error(`Failed to fetch image from URL: ${imageUrl}`);
+    const blob = await response.blob();
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+};
+
+const calculateFalImageSize = (img: HTMLImageElement): { width: number; height: number } => {
+    const { naturalWidth, naturalHeight } = img;
+    const longEdge = 2800;
+    if (naturalWidth >= naturalHeight) {
+        return {
+            width: longEdge,
+            height: Math.round(longEdge * (naturalHeight / naturalWidth)),
+        };
+    } else {
+        return {
+            width: Math.round(longEdge * (naturalWidth / naturalHeight)),
+            height: longEdge,
+        };
+    }
+};
+
+const falImageEdit = async (baseImage: string, prompt: string, referenceImages?: (string | null)[]): Promise<string> => {
+    const apiKey = getFalApiKey();
+    if (!apiKey) throw new Error("請在作品集設定中輸入您的 Fal API Key。");
+
+    const imageUrls = [baseImage, ...(referenceImages || [])].filter((img): img is string => img !== null);
+    if (imageUrls.length === 0) throw new Error("至少需要一張參考圖片。");
+
+    const firstImage = await new Promise<HTMLImageElement>((res, rej) => {
+        const img = new Image();
+        img.onload = () => res(img);
+        img.onerror = rej;
+        img.src = imageUrls[0];
+    });
+
+    const body = {
+        image_urls: imageUrls,
+        prompt: prompt,
+        enable_safety_checker: false,
+        image_size: calculateFalImageSize(firstImage),
+    };
+
+    const res = await fetch('https://fal.run/fal-ai/bytedance/seedream/v4/edit', {
+        method: 'POST',
+        headers: { 'Authorization': `Key ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+
+    if (res.status === 401) throw new Error("Fal API Key 無效。");
+    const initialData = await res.json();
+
+    if (initialData.error) {
+        throw new Error(`Fal.ai error: ${initialData.error}`);
+    }
+
+    let finalData = initialData;
+    if (initialData.status_url) {
+        finalData = await pollFalResult(initialData.status_url, apiKey);
+    }
+
+    const outputUrls = (finalData?.images || finalData?.output || []).map((o: any) => o.url);
+    const outputUrl = outputUrls[0];
+
+    if (!outputUrl) {
+        console.error("Fal API Response:", finalData);
+        throw new Error("Fal API 未返回有效的圖片 URL。");
+    }
+
+    return fetchAndConvertToBase64(outputUrl);
+};
+
+const falTextToImage = async (prompt: string, config: { numberOfImages?: number, aspectRatio?: string }): Promise<string[]> => {
+    const apiKey = getFalApiKey();
+    if (!apiKey) throw new Error("請在作品集設定中輸入您的 Fal API Key。");
+    
+    const [w, h] = (config.aspectRatio || '1:1').split(':').map(Number);
+    const longEdge = 2800;
+    const image_size = (w >= h) 
+        ? { width: longEdge, height: Math.round(longEdge * (h/w)) } 
+        : { width: Math.round(longEdge * (w/h)), height: longEdge };
+
+    const body = {
+        prompt,
+        enable_safety_checker: false,
+        num_images: config.numberOfImages || 1,
+        image_size,
+    };
+
+    const res = await fetch('https://fal.run/fal-ai/bytedance/seedream/v4/text-to-image', {
+        method: 'POST',
+        headers: { 'Authorization': `Key ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+
+    if (res.status === 401) throw new Error("Fal API Key 無效。");
+    const initialData = await res.json();
+
+    if (initialData.error) {
+        throw new Error(`Fal.ai error: ${initialData.error}`);
+    }
+
+    let finalData = initialData;
+    if (initialData.status_url) {
+        finalData = await pollFalResult(initialData.status_url, apiKey);
+    }
+
+    const outputUrls = (finalData?.images || finalData?.output || []).map((o: any) => o.url);
+
+    if (outputUrls.length === 0) {
+        console.error("Fal API Response:", finalData);
+        throw new Error("Fal API 未返回有效的圖片 URL。");
+    }
+
+    return Promise.all(outputUrls.map(fetchAndConvertToBase64));
+};
+
+// --- Switchable Main App Functions ---
+
+export const generateImages = async (params: { prompt: string; config: { numberOfImages: number, outputMimeType: string, aspectRatio: string } }): Promise<{ generatedImages: { image: { imageBytes: string } }[] }> => {
+    const selectedModel = localStorage.getItem('image_gen_model') || 'gemini';
+    
+    if (selectedModel === 'fal') {
+        const base64Strings = await falTextToImage(params.prompt, params.config);
+        return {
+            generatedImages: base64Strings.map(b64 => ({ image: { imageBytes: b64.split(',')[1] } }))
+        };
+    }
+    
+    const ai = getActiveAiClient();
+    // FIX: Corrects a type mismatch where the SDK's `generateImages` response has an optional `imageBytes` property,
+    // which conflicts with the function's return type that requires it. This processes the response to ensure type compatibility.
+    const response = await ai.models.generateImages({ model: 'imagen-4.0-generate-001', ...params });
+    return {
+        generatedImages: response.generatedImages.map(generatedImage => {
+            if (!generatedImage.image.imageBytes) {
+                throw new Error('Image generation succeeded but imageBytes are missing from the response.');
+            }
+            return {
+                image: {
+                    imageBytes: generatedImage.image.imageBytes,
+                },
+            };
+        }),
+    };
+};
 
 export const editImage = (baseImage: string, prompt: string, referenceImages?: (string | null)[]): Promise<string> => {
+    const model = localStorage.getItem('image_edit_model') || 'gemini';
+    if (model === 'fal') {
+        return falImageEdit(baseImage, prompt, referenceImages);
+    }
     const parts = [dataUrlToPart(baseImage)];
     if (referenceImages) {
         referenceImages.forEach(refImg => {
@@ -68,18 +250,27 @@ export const editImage = (baseImage: string, prompt: string, referenceImages?: (
     return callImageEditModel(parts, prompt);
 };
 
+export const inpaintImage = (baseImage: string, maskImage: string, prompt: string): Promise<string> => {
+    const model = localStorage.getItem('image_edit_model') || 'gemini';
+    const fullPrompt = `使用提供的遮罩編輯原始圖片。在遮罩區域內，添加以下時尚單品或配件：「${prompt}」。將變更無縫地融合到現有的服裝和光線中。`;
+
+    if (model === 'fal') {
+        return falImageEdit(baseImage, fullPrompt, [maskImage]);
+    }
+    
+    return callImageEditModel([dataUrlToPart(baseImage), dataUrlToPart(maskImage, true)], fullPrompt);
+};
+
+// --- Unchanged Functions (text-only or using switchable functions) ---
+
 export const generateInitialConcepts = (portraitImage: string, prompt: string, referenceImage: string | null, count: number): Promise<string[]> => {
     const basePrompt = `**任務：虛擬試穿**\n\n**指令：** 以輸入的人像為基礎，**務必保持人物的臉部、頭部和身份完全不變**。將他們目前的服裝替換為一套符合「${prompt || '多樣化'}」風格的完整穿搭。生成一張時尚、高品質的寫實照片。\n\n**嚴格要求：**\n1. **臉部保真**：絕對不能改變原始人物的臉部特徵和身份。\n2. **僅輸出圖片**：不要生成任何文字。`;
     const promises = Array(count).fill(0).map(() => editImage(portraitImage, basePrompt, [referenceImage]));
     return Promise.all(promises);
 };
 
-export const inpaintImage = (baseImage: string, maskImage: string, prompt: string): Promise<string> => {
-    const fullPrompt = `使用提供的遮罩編輯原始圖片。在遮罩區域內，添加以下時尚單品或配件：「${prompt}」。將變更無縫地融合到現有的服裝和光線中。`;
-    return callImageEditModel([dataUrlToPart(baseImage), dataUrlToPart(maskImage, true)], fullPrompt);
-};
-
 export const suggestScene = async (baseImage: string): Promise<string> => {
+    const ai = getActiveAiClient();
     const imagePart = dataUrlToPart(baseImage);
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -94,6 +285,7 @@ export const suggestScene = async (baseImage: string): Promise<string> => {
 };
 
 export const suggestOutfit = async (itemImages: string[], personImage: string): Promise<string> => {
+    const ai = getActiveAiClient();
     const imageParts = [dataUrlToPart(personImage), ...itemImages.map(img => dataUrlToPart(img))];
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -105,19 +297,16 @@ export const suggestOutfit = async (itemImages: string[], personImage: string): 
 export const generateMoodboard = async (itemImages: string[], personImage: string, prompt: string): Promise<string> => {
     const imageParts = [dataUrlToPart(personImage), ...itemImages.map(img => dataUrlToPart(img))];
     const moodboardPrompt = `根據提供的人物和時尚單品圖片，以及使用者期望的「${prompt || '一個有趣且有創意的風格'}」風格，創建一張單一、有凝聚力的「情緒板」圖片。這張圖片不應是簡單的拼貼。相反，它必須是一張概念性、藝術性的圖像，捕捉期望的時尚美學。它 sollte視覺化地呈現最終服裝和場景的情緒、色調、紋理和整體感覺。例如，它可以是抽象的紋理、一個光線優美的房間角落，或是一個能喚起正確情感的風景。專注於創建一張視覺上鼓舞人心的參考圖像，為拍攝設定基調。`;
-    
-    // Use the faster image editing model for conceptual generation
-    return callImageEditModel(imageParts, moodboardPrompt);
+    return editImage(personImage, moodboardPrompt, itemImages);
 };
 
 export const createOutfitFromItems = async (itemImages: string[], personImage: string, prompt: string): Promise<string> => {
-    const imageParts = [dataUrlToPart(personImage), ...itemImages.map(img => dataUrlToPart(img))];
+    const ai = getActiveAiClient();
     const descriptionResponse = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: { parts: [{ text: `根據這些人物和時尚單品的圖片，以及使用者的描述「${prompt}」，為一個圖片生成模型生成一個高度詳細的提示。目標是創建一張照片般逼真的時尚寫真，展示該人物穿著所有提供的單品組成的協調服裝。` }, ...imageParts] },
+        contents: { parts: [{ text: `根據這些人物和時尚單品的圖片，以及使用者的描述「${prompt}」，為一個圖片生成模型生成一個高度詳細的提示。目標是創建一張照片般逼真的時尚寫真，展示該人物穿著所有提供的單品組成的協調服裝。` }, dataUrlToPart(personImage), ...itemImages.map(img => dataUrlToPart(img))] },
     });
-    const response = await ai.models.generateImages({
-        model: 'imagen-4.0-generate-001',
+    const response = await generateImages({
         prompt: `照片般逼真的時尚攝影。 ${descriptionResponse.text}`,
         config: { numberOfImages: 1, outputMimeType: 'image/jpeg', aspectRatio: '9:16' },
     });
@@ -126,21 +315,21 @@ export const createOutfitFromItems = async (itemImages: string[], personImage: s
 
 export const integrateAccessoryWithMask = (baseImage: string, accessoryImage: string, maskImage: string): Promise<string> => {
     const prompt = `將第二張圖片中的時尚配件整合到第一張圖片的人物身上。將其放置在第三張圖片中黑色遮罩所指示的區域。調整光線、陰影和透視，以達到無縫、照片般逼真的效果。`;
-    return callImageEditModel([dataUrlToPart(baseImage), dataUrlToPart(accessoryImage), dataUrlToPart(maskImage, true)], prompt);
+    return editImage(baseImage, prompt, [accessoryImage, maskImage]);
 };
 
 export const searchAndGenerateAccessory = async (query: string, count: number): Promise<string[]> => {
-    const response = await ai.models.generateImages({
-        model: 'imagen-4.0-generate-001',
+    const response = await generateImages({
         prompt: `一件單獨的時尚單品，「${query}」，放置在純白色背景上，攝影棚燈光，照片般逼真的產品照。`,
         config: { numberOfImages: count, outputMimeType: 'image/jpeg', aspectRatio: '1:1' },
     });
     return response.generatedImages.map(img => `data:image/jpeg;base64,${img.image.imageBytes}`);
 };
 
-export const removeImageBackground = (image: string): Promise<string> => callImageEditModel([dataUrlToPart(image)], '分割此圖中的主要物體或人物，並使背景透明。輸出一張帶有透明背景的 PNG 圖片。');
+export const removeImageBackground = (image: string): Promise<string> => editImage(image, '分割此圖中的主要物體或人物，並使背景透明。輸出一張帶有透明背景的 PNG 圖片。');
 
 export const generateRandomStyles = async (count: number): Promise<string[]> => {
+    const ai = getActiveAiClient();
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: `生成 ${count} 個簡短、有創意的時尚或藝術風格描述。風格要多樣化，包含現代潮流、歷史時期、藝術運動、繪畫風格等。例如：「Y2K 千禧辣妹風」、「少年漫畫風格」、「奢華晚宴」、「賽博龐克」、「印象派畫風」。以 JSON 陣列的格式返回結果。語言：繁體中文。`,
@@ -160,12 +349,7 @@ export const generateRandomStyles = async (count: number): Promise<string[]> => 
 
 export const generatePoseAngleEmotionView = (baseImage: string, type: 'pose' | 'angle' | 'emotion', prompt: string, referenceImage?: string | null): Promise<string> => {
     let fullPrompt = '';
-    const references = [];
     const outputInstruction = '\n\n**嚴格要求：**\n1. **僅輸出圖片**：不要生成任何文字。\n2. **身份保真**：絕對不能改變原始人物的臉部特徵和身份。';
-
-    if (referenceImage) {
-        references.push(dataUrlToPart(referenceImage));
-    }
     
     switch (type) {
         case 'pose':
@@ -187,10 +371,11 @@ export const generatePoseAngleEmotionView = (baseImage: string, type: 'pose' | '
     }
     
     fullPrompt += outputInstruction;
-    return callImageEditModel([dataUrlToPart(baseImage), ...references], fullPrompt);
+    return editImage(baseImage, fullPrompt, [referenceImage]);
 };
 
 export const generateRandomPrompts = async (type: 'pose' | 'angle' | 'emotion' | 'model', count: number): Promise<string[]> => {
+    const ai = getActiveAiClient();
     let content = '';
     let fallbackType = '';
     switch (type) {
@@ -239,12 +424,12 @@ export const generateModelWearingGarment = (garmentImage: string, modelPrompt: s
 **嚴格要求：**
 1. **服裝保真**：必須準確呈現服裝的設計、顏色和合身度。
 2. **僅輸出圖片**：絕對不要生成任何文字、描述或評論。你的唯一輸出必須是最終的圖片。`;
-    return callImageEditModel([dataUrlToPart(garmentImage)], fullPrompt);
+    return editImage(garmentImage, fullPrompt, []);
 };
 
 export const generatePersonWearingGarment = (personImage: string, garmentImage: string, bodyDescription?: string): Promise<string> => {
     const bodyInstruction = bodyDescription
-        ? `如果第一張圖是頭像，請根據此描述「${bodyDescription}」為人物生成一個完整的身體。生成的身體應與頭部無縫連接。`
+        ? `如果第一張圖是頭像，請根據此描述「${bodyDescription}」為人物生成一個完整的身体。生成的身體應與頭部無縫連接。`
         : "如果第一張圖是頭像，請智慧地生成一個與人物特徵相匹配的、合適且逼真的完整身體。";
 
     const fullPrompt = `**任務：虛擬試穿**
@@ -261,12 +446,10 @@ export const generatePersonWearingGarment = (personImage: string, garmentImage: 
     return editImage(personImage, fullPrompt, [garmentImage]);
 };
 
-
 // --- Imaginative Module Functions ---
 
 export const generateVirtualModel = async (modelType: string, style: string): Promise<string> => {
-    const response = await ai.models.generateImages({
-        model: 'imagen-4.0-generate-001',
+    const response = await generateImages({
         prompt: `A photorealistic fashion portrait of a virtual model. Their character type is: "${modelType}". Their clothing style is: "${style}". Create a unique and creative character. Ensure high-resolution and cinematic lighting.`,
         config: { numberOfImages: 1, outputMimeType: 'image/jpeg', aspectRatio: '9:16' },
     });
@@ -274,8 +457,7 @@ export const generateVirtualModel = async (modelType: string, style: string): Pr
 };
 
 export const generateConceptClothing = async (clothingType: string, style: string): Promise<string> => {
-    const response = await ai.models.generateImages({
-        model: 'imagen-4.0-generate-001',
+    const response = await generateImages({
         prompt: `A single piece of concept clothing, a "${clothingType}", designed in the style of: "${style}". Present a unique design concept. The object is centered on a plain white background, with studio lighting, photorealistic.`,
         config: { numberOfImages: 1, outputMimeType: 'image/jpeg', aspectRatio: '1:1' },
     });
@@ -284,7 +466,7 @@ export const generateConceptClothing = async (clothingType: string, style: strin
 
 export const generateTimeTravelScene = (baseImage: string, era: string): Promise<string> => {
     const prompt = `重繪這張照片中的人物，但將他們的服裝和背景更改為符合「${era}」的風格。保持完全相同的人物、臉部和身份至關重要。\n\n**嚴格要求：**\n1. **僅輸出圖片**：不要生成任何文字。\n2. **身份保真**：絕對不能改變原始人物的臉部特徵和身份。`;
-    return callImageEditModel([dataUrlToPart(baseImage)], prompt);
+    return editImage(baseImage, prompt, []);
 };
 
 const getBoutiqueItemPrompt = (itemType: string): string => {
@@ -297,29 +479,28 @@ const getBoutiqueItemPrompt = (itemType: string): string => {
         '滑鼠墊': `設計一個高品質的滑鼠墊，其特色是對提供圖片中人物和服裝的風格化藝術詮釋。設計應美觀並捕捉角色風格的精髓。最終輸出應為該滑鼠墊在現代辦公桌設置上的照片般逼真的產品照，旁邊放著鍵盤和滑鼠。${imageOnlyInstruction}`,
         '床單毛巾': `根據提供圖片中服裝的圖案、顏色和整體氛圍，為一套豪華床單（或一條大毛巾）設計一個圖案。設計應是對源圖像主題的雅致抽象。最終輸出應為該產品整齊折疊或展示在床上/浴室環境中的照片般逼真的照片，以展示其設計。${imageOnlyInstruction}`,
         '香氛蠟燭': `根據提供的圖片，設計一款奢華香氛蠟燭。主要重點是燭杯（容器）的設計，應融入服裝美學中的顏色、圖案和材質。同時，為蠟燭設計一個簡約而優雅的標籤。最終輸出必須是該蠟燭的照片般逼真的產品照片，呈現在與其風格相得益彰的表面上，並採用柔和、專業的燈光，突顯燭杯的質感。${imageOnlyInstruction}`,
-        '拼圖': `使用提供的圖片作為靈感，設計一個 1000 片的拼圖。拼圖的圖像應該是對人物時尚風格的優美、藝術性詮釋。最終輸出必須是專業的產品照片。場景應展示拼圖的盒子，盒子上有完整的藝術品，直立放置。在盒子前面，應該有一小部分實際的拼圖已經拼好，旁邊散落著幾片形狀獨特的零散拼圖塊，營造出一種真實感和邀請感。使用乾淨、明亮的攝影棚燈光。${imageOnlyInstruction}`,
+        '拼圖': `使用提供的圖片作為靈感，設計一個 1000 片的拼圖。拼圖的圖像應該是對人物時尚風格的優美、藝術性詮釋。最終輸出必須是專業的產品照片。場景應展示拼圖的盒子，盒子上有完整的藝術品，直立放置。在盒子前面，應該有一小部分實際的拼圖已經拼好，旁邊散落著幾片形狀獨特的零散拼圖塊，營造出一種真實感和邀請感。使用乾淨、明亮的攝影棚灯光。${imageOnlyInstruction}`,
     };
     return prompts[itemType] || `根據提供圖片中服裝的風格、顏色和整體主題，設計一款有創意且吸引人的「${itemType}」。最終輸出應為該物品在乾淨、中性背景上的照片般逼真的產品照片，看起來像專業的商業攝影。${imageOnlyInstruction}`;
 };
 
 export const generateBoutiqueItem = (baseImage: string, itemType: string): Promise<string> => {
     const prompt = getBoutiqueItemPrompt(itemType);
-    return callImageEditModel([dataUrlToPart(baseImage)], prompt);
+    return editImage(baseImage, prompt, []);
 };
 
 const alchemyPrompt = (type: 'outfit' | 'accessory', userPrompt: string): string => `分析所有提供的參考圖片，以理解它們結合後的美學、風格、色調和紋理。然後，生成一張單一的、全新的、照片般逼真的「${userPrompt}」圖片。這個新創作應該是所有參考圖片風格的創造性融合。不要簡單地複製元素；要創造一個有凝聚力的新設計。${type === 'accessory' ? '將最終物體放置在純白色背景上，並使用攝影棚燈光。' : '這應該是一張完整的時尚寫真，有模特兒穿著這套服裝。'} \n\n**嚴格要求：**\n1. **僅輸出圖片**：不要生成任何文字。`;
 
 export const generateAlchemyOutfit = (referenceImages: string[], prompt: string): Promise<string> => {
-    const parts = referenceImages.map(img => dataUrlToPart(img));
-    return callImageEditModel(parts, alchemyPrompt('outfit', prompt));
+    return editImage(referenceImages[0], alchemyPrompt('outfit', prompt), referenceImages.slice(1));
 };
 
 export const generateAlchemyAccessory = (referenceImages: string[], prompt: string): Promise<string> => {
-    const parts = referenceImages.map(img => dataUrlToPart(img));
-    return callImageEditModel(parts, alchemyPrompt('accessory', prompt));
+    return editImage(referenceImages[0], alchemyPrompt('accessory', prompt), referenceImages.slice(1));
 };
 
 export const describeImageStyle = async (referenceImage: string): Promise<string> => {
+    const ai = getActiveAiClient();
     const imagePart = dataUrlToPart(referenceImage);
     const prompt = '分析這張圖片中的服裝，並用一個簡潔的短語描述其時尚風格，該短語應適合用作圖片生成提示。例如：「帶有低腰牛仔褲的 Y2K 街頭風格」、「帶有粗花呢西裝外套的深色學術風」或「帶有機能性面料的 Gorpcore 風」。僅提供風格描述短語。';
     const response = await ai.models.generateContent({
@@ -339,12 +520,13 @@ export const generateStyledCreation = (creationPrompt: string, styleReferenceIma
 **嚴格要求：**
 1. **僅輸出圖片**：你的唯一輸出必須是最終的圖片。不要生成任何文字。
 2. **照片般逼真**：生成一張高品質、逼真的照片。`;
-    return callImageEditModel([dataUrlToPart(styleReferenceImage)], fullPrompt);
+    return editImage(styleReferenceImage, fullPrompt, []);
 };
 
 
 // --- Infinite Photoshoot Module Functions ---
 export const describeImageForAlbum = async (imageUrl: string): Promise<{ title: string; description: string }> => {
+    const ai = getActiveAiClient();
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: {
@@ -374,6 +556,7 @@ export const describeImageForAlbum = async (imageUrl: string): Promise<{ title: 
 };
 
 export const generateVariations = async (category: string, count: number): Promise<{ title: string; description: string; prompt: string }[]> => {
+    const ai = getActiveAiClient();
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: `您是一位高級時尚雜誌的創意總監。針對「${category}」類別，生成整整 ${count} 個多樣化且富於想像力的攝影概念。對於每個概念，請提供：1. 一個簡短、引人注目的「title」。2. 一句能喚起情緒的「description」。3. 一個給 AI 圖像生成器的簡潔「prompt」，專注於服裝和場景的視覺元素。語言必須是繁體中文。`,
@@ -401,13 +584,21 @@ export const generateVariations = async (category: string, count: number): Promi
     }
 };
 
-export const generateMagazineHeadlines = async (theme: string): Promise<{ title: string; headlines: string[] }> => {
+export const generateMagazineHeadlines = async (theme: string, language: 'en' | 'zh-Hant' = 'en'): Promise<{ title: string; headlines: string[] }> => {
+    const ai = getActiveAiClient();
+    const prompt = language === 'zh-Hant'
+    ? `您是一位高級時尚雜誌的創意總監。下一期的主題是「${theme}」。請為封面生成內容。所有文字必須使用繁體中文。
+    輸出應為一個 JSON 物件，包含：
+    1. 雜誌的主要「title」(例如：「風尚」、「品味」、「VOGUE」或與主題相關的創意名稱)。
+    2. 一個包含 2 至 4 個與主題相關的簡短、有力「headlines」的陣列。標題總數不應超過 4 個。範例：「風格的未來」、「經典單品再想像」、「新時代的開端」。`
+    : `You are a creative director for a high-fashion magazine. The theme for the next issue is "${theme}". Generate content for the cover. Provide all text in English.
+    The output should be a JSON object with:
+    1. A main "title" for the magazine (e.g., "VOGUE", "ELLE", "BAZAAR", or something creative related to the theme).
+    2. An array of 2 to 4 short, punchy "headlines" related to the theme. The total number of headlines should not exceed 4. Examples: "The Future of Style", "Timeless Pieces Reimagined", "A New Era Begins".`;
+    
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `You are a creative director for a high-fashion magazine. The theme for the next issue is "${theme}". Generate content for the cover. Provide all text in English.
-        The output should be a JSON object with:
-        1. A main "title" for the magazine (e.g., "VOGUE", "ELLE", "BAZAAR", or something creative related to the theme).
-        2. An array of 2 to 4 short, punchy "headlines" related to the theme. The total number of headlines should not exceed 4. Examples: "The Future of Style", "Timeless Pieces Reimagined", "A New Era Begins".`,
+        contents: prompt,
         config: {
             responseMimeType: "application/json",
             responseSchema: {
@@ -424,11 +615,15 @@ export const generateMagazineHeadlines = async (theme: string): Promise<{ title:
         return JSON.parse(response.text);
     } catch (e) {
         console.error("Failed to parse magazine headlines:", e);
+        if (language === 'zh-Hant') {
+            return { title: theme.toUpperCase(), headlines: ["風格特刊", "大膽與美麗", "現代時尚"] };
+        }
         return { title: theme.toUpperCase(), headlines: ["The Style Issue", "Bold & Beautiful", "Modern Fashion"] };
     }
 };
 
 export const generateSuggestedPrompts = async (type: 'scene' | 'style', count: number): Promise<string[]> => {
+    const ai = getActiveAiClient();
     const content = `為時尚攝影的${type}生成 ${count} 個多樣化且有創意的一句話概念。場景範例：「夜晚的東京街頭」、「有霧的森林」。風格範例：「哥德蘿莉塔」、「80年代復古未來主義」。以 JSON 字符串數組格式返回結果。語言：繁體中文。`;
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -447,6 +642,7 @@ export const generateSuggestedPrompts = async (type: 'scene' | 'style', count: n
 };
 
 export const generateSingleSuggestedCategory = async (): Promise<string> => {
+    const ai = getActiveAiClient();
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: `生成一個單一、有創意的、一到兩個詞的時尚攝影類別。範例：「年代」、「奇幻」、「藝術」、「次文化」。僅以純文字返回類別名稱。語言：繁體中文。`,
@@ -457,6 +653,7 @@ export const generateSingleSuggestedCategory = async (): Promise<string> => {
 // --- Outfit Analysis Module Functions ---
 
 export const analyzeOutfit = async (image: string): Promise<{ item: string; description: string; brand: string }[]> => {
+    const ai = getActiveAiClient();
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: {
@@ -491,10 +688,11 @@ export const analyzeOutfit = async (image: string): Promise<{ item: string; desc
 
 export const extractClothingItem = (baseImage: string, itemDescription: string): Promise<string> => {
     const prompt = `從提供的圖片中，精確地提取被描述為「${itemDescription}」的服裝項目。輸出必須是只有該物品且背景透明的 PNG 圖片。不要包含人物或背景的任何其他部分。`;
-    return callImageEditModel([dataUrlToPart(baseImage)], prompt);
+    return editImage(baseImage, prompt, []);
 };
 
 export const critiqueAndRedesignOutfit = async (image: string): Promise<{ critique: string; imageUrl: string }> => {
+    const ai = getActiveAiClient();
     const prompt = `您是一位專業的時尚造型師。
     1. **評價**: 首先，對所提供圖片中的穿搭提出建設性的評價。具體說明哪些部分搭配得好，哪些可以改進。
     2. **改造**: 根據您的評價，重新設計一套更時尚、更協調或更前衛的穿搭。生成一張同一個人物穿著改良後服裝的新圖片。
@@ -526,7 +724,6 @@ export const critiqueAndRedesignOutfit = async (image: string): Promise<{ critiq
     }
 
     if (!critique || !imageUrl) {
-        // Fallback or more specific error handling can be added here
         if (candidate.finishReason && candidate.finishReason !== 'STOP') {
              throw new Error(`模型未能同時生成評價和圖片，原因：${candidate.finishReason}`);
         }

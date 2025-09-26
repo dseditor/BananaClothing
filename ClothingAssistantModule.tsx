@@ -138,7 +138,7 @@ const ClothingAssistantModule = ({ onBack, onSave, initialImage, onOpenPortfolio
 
     const handleGarmentImagesUpload = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files) {
-            const files = Array.from(e.target.files);
+            const files = Array.from(e.target.files as FileList);
             if (garmentImages.length + files.length > 8) {
                 alert('最多只能上傳 8 件衣服圖片。');
                 return;

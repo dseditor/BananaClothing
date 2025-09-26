@@ -2,12 +2,12 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import React, { useState, ChangeEvent, ReactElement, useRef, useEffect, useMemo } from 'react';
+import React, { useState, ChangeEvent, ReactElement, useRef, useEffect, useMemo, ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { editImage, generateRandomStyles, inpaintImage, suggestOutfit, generateMoodboard, removeImageBackground, suggestScene, searchAndGenerateAccessory } from './services/geminiService';
 import { createZipAndDownload } from './lib/zipUtils';
 import { createProcessAlbumAndDownload, createAlbumPageAndDownload, createCompositionAlbumAndDownload, createDynamicAlbumAndDownload } from './lib/albumUtils';
-import { addPortfolioItem, PortfolioItem, getAllPortfolioItems, deletePortfolioItems } from './services/dbService';
+import { addPortfolioItem, PortfolioItem, getAllPortfolioItems, deletePortfolioItems, clearAllPortfolioItems, addMultiplePortfolioItems, getPortfolioSize } from './services/dbService';
 import ImageCard from './components/PolaroidCard';
 import MaskingCanvas from './components/MaskingCanvas';
 import { cn, getTimestamp } from './lib/utils';
@@ -108,6 +108,205 @@ export interface HistoryItem {
     prompt?: string;
     moodboardUrl?: string;
 }
+
+const SettingsModal = ({ isOpen, onClose, onClearAll, onRestoreRequest }: { isOpen: boolean; onClose: () => void; onClearAll: () => void; onRestoreRequest: (data: any) => void; }) => {
+    const [storageLimit, setStorageLimit] = useState<number>(() => Number(localStorage.getItem('portfolio_storage_limit_mb') || 200));
+    const [currentUsage, setCurrentUsage] = useState<number>(0);
+    const restoreInputRef = useRef<HTMLInputElement>(null);
+    const neutralButtonClasses = "text-sm text-center text-neutral-700 bg-black/5 border border-neutral-300 py-2 px-4 rounded-md transition-colors duration-200 hover:bg-black/10 disabled:opacity-50";
+
+    const [falApiKey, setFalApiKey] = useState<string>(() => localStorage.getItem('fal_api_key') || '');
+    const [imageEditModel, setImageEditModel] = useState<string>(() => localStorage.getItem('image_edit_model') || 'gemini');
+    const [imageGenModel, setImageGenModel] = useState<string>(() => localStorage.getItem('image_gen_model') || 'gemini');
+
+    const [secondaryApiKey, setSecondaryApiKey] = useState<string>(() => localStorage.getItem('secondaryApiKey') || '');
+    const [isSecondaryKeyEnabled, setIsSecondaryKeyEnabled] = useState<boolean>(() => localStorage.getItem('isSecondaryKeyEnabled') === 'true');
+    const [defaultKeyExists, setDefaultKeyExists] = useState(false);
+
+    useEffect(() => {
+        if (isOpen) {
+            updateUsage();
+            setDefaultKeyExists(!!process.env.API_KEY && process.env.API_KEY.length > 5);
+        }
+    }, [isOpen]);
+
+    useEffect(() => {
+        localStorage.setItem('secondaryApiKey', secondaryApiKey);
+    }, [secondaryApiKey]);
+
+    useEffect(() => {
+        localStorage.setItem('isSecondaryKeyEnabled', String(isSecondaryKeyEnabled));
+    }, [isSecondaryKeyEnabled]);
+    
+    const updateUsage = async () => {
+        const sizeInBytes = await getPortfolioSize();
+        setCurrentUsage(Number((sizeInBytes / 1024 / 1024).toFixed(2)));
+    };
+
+    const handleLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const newLimit = Number(e.target.value);
+        setStorageLimit(newLimit);
+        localStorage.setItem('portfolio_storage_limit_mb', newLimit.toString());
+    };
+    
+    const handleBackup = async () => {
+        try {
+            const itemsToBackup = await getAllPortfolioItems();
+            const backupData = {
+                timestamp: new Date().toISOString(),
+                data: itemsToBackup,
+            };
+            const jsonString = JSON.stringify(backupData, null, 2);
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `portfolio_backup_${getTimestamp()}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
+            alert('備份成功！');
+        } catch (error) {
+            alert('備份失敗。');
+            console.error(error);
+        }
+    };
+    
+    const handleRestore = (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            try {
+                const content = e.target?.result;
+                if (typeof content !== 'string') throw new Error('檔案讀取錯誤');
+                
+                const backupData = JSON.parse(content);
+                if (!backupData.data || !Array.isArray(backupData.data)) {
+                    throw new Error('無效的備份檔案格式。');
+                }
+                
+                onRestoreRequest(backupData);
+            } catch (error) {
+                alert(`還原失敗: ${error instanceof Error ? error.message : '未知錯誤'}`);
+                console.error(error);
+            } finally {
+                if (restoreInputRef.current) restoreInputRef.current.value = '';
+            }
+        };
+        reader.readAsText(file);
+    };
+
+    const handleFalKeyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setFalApiKey(e.target.value);
+        localStorage.setItem('fal_api_key', e.target.value);
+    };
+    
+    const handleEditModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        setImageEditModel(e.target.value);
+        localStorage.setItem('image_edit_model', e.target.value);
+    };
+    
+    const handleGenModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        setImageGenModel(e.target.value);
+        localStorage.setItem('image_gen_model', e.target.value);
+    };
+
+    if (!isOpen) return null;
+
+    const usagePercentage = storageLimit > 0 ? (currentUsage / storageLimit) * 100 : 0;
+    const isSecondaryKeyActive = isSecondaryKeyEnabled && !!secondaryApiKey;
+
+    return (
+        <MotionDiv initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
+            <MotionDiv initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} onClick={e => e.stopPropagation()} className="bg-[#F8F5F2] rounded-xl shadow-2xl w-full max-w-md p-6 overflow-y-auto max-h-[90vh]">
+                <div className="space-y-6">
+                    <h3 className="text-2xl font-bold text-[#3D405B]">應用程式設定</h3>
+                    
+                    <div className="space-y-3">
+                        <h4 className="font-semibold text-neutral-700">Gemini API 金鑰設定</h4>
+                        <p className="text-xs text-neutral-500">預設使用環境金鑰。您可以啟用並提供備用金鑰來覆蓋預設值。</p>
+                        <div>
+                            <label className="block text-sm text-neutral-600">預設金鑰 (環境變數)</label>
+                            <div className={cn("mt-1 w-full p-2 border rounded-lg text-sm", !isSecondaryKeyActive ? 'border-green-500 bg-green-50 text-green-800 font-medium' : 'bg-gray-100 border-gray-300 text-gray-500')}>
+                                {defaultKeyExists ? '● 已啟用' : '未設定'}
+                            </div>
+                        </div>
+                        <div>
+                            <div className="flex items-center justify-between">
+                                <label htmlFor="secondary-api-key" className="block text-sm text-neutral-600">備用金鑰</label>
+                                <div className="flex items-center gap-2 text-sm">
+                                    <label htmlFor="enable-secondary-key" className="cursor-pointer text-neutral-600">啟用</label>
+                                    <input
+                                        type="checkbox"
+                                        id="enable-secondary-key"
+                                        checked={isSecondaryKeyEnabled}
+                                        onChange={e => setIsSecondaryKeyEnabled(e.target.checked)}
+                                        className="h-4 w-4 rounded border-gray-300 text-[#E07A5F] focus:ring-[#E07A5F]"
+                                    />
+                                </div>
+                            </div>
+                            <input
+                                id="secondary-api-key"
+                                type="password"
+                                value={secondaryApiKey}
+                                onChange={e => setSecondaryApiKey(e.target.value)}
+                                disabled={!isSecondaryKeyEnabled}
+                                className={cn(
+                                    "mt-1 w-full p-2 border rounded-lg focus:ring-2 focus:ring-[#E07A5F] transition-colors",
+                                    isSecondaryKeyActive && 'border-green-500 bg-green-50'
+                                )}
+                            />
+                        </div>
+                    </div>
+
+                    <div className="space-y-3 border-t pt-4">
+                        <h4 className="font-semibold text-neutral-700">Fal.ai 模型設定</h4>
+                        <p className="text-xs text-neutral-500">輸入您的 Fal API Key 以啟用替代模型。金鑰將儲存在您的瀏覽器中。</p>
+                        <label htmlFor="fal-api-key" className="block text-sm text-neutral-600">Fal API Key</label>
+                        <input id="fal-api-key" type="password" value={falApiKey} onChange={handleFalKeyChange} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#E07A5F]" />
+                        <label htmlFor="edit-model-select" className="block text-sm text-neutral-600 mt-2">圖片編輯模型</label>
+                        <select id="edit-model-select" value={imageEditModel} onChange={handleEditModelChange} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#E07A5F] bg-white text-gray-900">
+                            <option value="gemini">Gemini 2.5 Flash Image Preview</option>
+                            <option value="fal">Fal / Seedream V4 Edit</option>
+                        </select>
+                        <label htmlFor="gen-model-select" className="block text-sm text-neutral-600 mt-2">圖片生成模型</label>
+                        <select id="gen-model-select" value={imageGenModel} onChange={handleGenModelChange} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#E07A5F] bg-white text-gray-900">
+                            <option value="gemini">Gemini Imagen 4.0</option>
+                            <option value="fal">Fal / Seedream V4 Text-to-Image</option>
+                        </select>
+                    </div>
+
+                    <div className="space-y-3 border-t pt-4">
+                        <h4 className="font-semibold text-neutral-700">儲存空間管理</h4>
+                        <label htmlFor="storage-limit" className="block text-sm text-neutral-600">作品集容量上限 (MB)</label>
+                        <input id="storage-limit" type="number" min="50" max="2000" step="50" value={storageLimit} onChange={handleLimitChange} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#E07A5F]" />
+                        <div className="w-full bg-gray-200 rounded-full h-2.5">
+                            <div className="bg-[#E07A5F] h-2.5 rounded-full" style={{ width: `${Math.min(usagePercentage, 100)}%` }}></div>
+                        </div>
+                        <p className="text-sm text-neutral-500 text-right">{currentUsage} MB / {storageLimit} MB</p>
+                        {usagePercentage > 90 && <p className="text-sm text-yellow-600">警告：容量即將用盡。當新增作品超出上限時，將自動從最舊的作品開始刪除。</p>}
+                    </div>
+
+                    <div className="space-y-3 border-t pt-4">
+                         <h4 className="font-semibold text-neutral-700">備份與還原</h4>
+                         <div className="grid grid-cols-2 gap-3">
+                             <button onClick={handleBackup} className={neutralButtonClasses + " w-full"}>備份作品集</button>
+                             <button onClick={() => restoreInputRef.current?.click()} className={neutralButtonClasses + " w-full"}>還原作品集</button>
+                             <input type="file" accept=".json" ref={restoreInputRef} onChange={handleRestore} className="hidden" />
+                         </div>
+                    </div>
+
+                    <div className="border-t pt-4 space-y-3">
+                         <h4 className="font-semibold text-red-700">危險區域</h4>
+                         <button onClick={onClearAll} className="text-sm text-center text-red-600 bg-red-100 border border-red-200 py-2 px-4 rounded-md transition-colors duration-200 hover:bg-red-200 disabled:opacity-50 w-full" >清除所有作品</button>
+                    </div>
+                </div>
+            </MotionDiv>
+        </MotionDiv>
+    );
+};
 
 const StyleSpecificationUI = ({
     styleList,
@@ -237,7 +436,16 @@ const ReferenceImageUpload = ({ onUpload, onClear, image, disabled = false, titl
 );
 
 // --- START: UI Components ---
-const GlassButton = ({ onClick, emoji, title, description, imageUrl }: { onClick: () => void; emoji: string; title: string; description: string; imageUrl?: string; }) => (
+interface GlassButtonProps {
+    onClick: () => void;
+    emoji: string;
+    title: string;
+    description: string;
+    imageUrl?: string;
+    key?: string;
+}
+
+const GlassButton = ({ onClick, emoji, title, description, imageUrl }: GlassButtonProps) => (
     <div 
         className="liquidGlass-wrapper group aspect-square"
         onClick={onClick} 
@@ -273,7 +481,7 @@ const ModuleSelection = ({ onSelect }: { onSelect: (mode: Mode) => void }) => (
     <MotionDiv initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.8, type: 'spring' }} className="w-full max-w-7xl text-center grid grid-cols-2 lg:grid-cols-4 gap-6">
         {homepageCards.map((card) => (
             <GlassButton
-                key={card.id}
+                key={card.id as string}
                 onClick={() => onSelect(card.id)}
                 emoji={card.emoji}
                 title={card.title}
@@ -379,7 +587,7 @@ const OutfitCompositionSetup: React.FC<OutfitCompositionSetupProps> = ({
 
     const handleItemImagesUpload = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files) {
-            const files = Array.from(e.target.files);
+            const files = Array.from(e.target.files as FileList);
             if (itemImages.length + files.length > 8) {
                 alert('最多只能上傳 8 件單品圖片。');
                 return;
@@ -617,6 +825,7 @@ const PortfolioPicker = ({ isOpen, onClose, onSelect }: { isOpen: boolean, onClo
 
     const filterTabs = useMemo(() => {
         const modes = new Set(items.map(item => item.mode));
+        // @ts-ignore - Type inference issue with translation function
         const sortedModes = Array.from(modes).sort((a, b) => t(a).localeCompare(t(b), 'zh-Hant'));
         return ['all', ...sortedModes];
     }, [items]);
@@ -715,6 +924,9 @@ function App() {
     // Showcase Mode State
     const [isShowcaseMode, setIsShowcaseMode] = useState(false);
     const [showcaseKey, setShowcaseKey] = useState(Date.now());
+    
+    // Settings Modal State
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
     useEffect(() => {
         const enabled = localStorage.getItem('showcaseModeEnabled') === 'true';
@@ -935,7 +1147,7 @@ function App() {
             const filename = `風格概念相簿_${timestamp}.jpg`;
             await createDynamicAlbumAndDownload(imagesToAlbum, filename);
         } catch (error) {
-            alert(`生成相簿失敗: ${error instanceof Error ? error.message : '未知錯誤'}`);
+            alert(`生成相簿失败: ${error instanceof Error ? error.message : '未知錯誤'}`);
         } finally {
             setIsLoading(false);
             setLoadingMessage('');
@@ -1639,17 +1851,17 @@ function App() {
                     ? <ShowcaseHomepage key={showcaseKey} onSendTo={handleSendToModule} onDeleteItem={handleDeleteFromShowcase} /> 
                     : <ModuleSelection onSelect={(selectedMode) => setMode(selectedMode)} />;
             case 'multiAngle':
-                return <MultiAngleModule key={key} onBack={handleStartOver} onSave={saveHandler} initialImage={initialImageForModule} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} isShowcaseMode={isShowcaseMode} />;
+                return <MultiAngleModule onBack={handleStartOver} onSave={saveHandler} initialImage={initialImageForModule} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} isShowcaseMode={isShowcaseMode} />;
             case 'imaginative':
-                return <ImaginativeModule key={key} onBack={handleStartOver} onSave={saveHandler} isShowcaseMode={isShowcaseMode} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} />;
+                return <ImaginativeModule onBack={handleStartOver} onSave={saveHandler} isShowcaseMode={isShowcaseMode} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} />;
             case 'infinitePhotoshoot':
-                return <InfinitePhotoshootModule key={key} onBack={handleStartOver} onSave={saveHandler} initialImage={initialImageForModule} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} isShowcaseMode={isShowcaseMode} />;
+                return <InfinitePhotoshootModule onBack={handleStartOver} onSave={saveHandler} initialImage={initialImageForModule} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} isShowcaseMode={isShowcaseMode} />;
             case 'clothingAssistant':
-                return <ClothingAssistantModule key={key} onBack={handleStartOver} onSave={saveHandler} initialImage={initialImageForModule} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} isShowcaseMode={isShowcaseMode} />;
+                return <ClothingAssistantModule onBack={handleStartOver} onSave={saveHandler} initialImage={initialImageForModule} onOpenPortfolioPicker={(cb) => openPortfolioPicker(cb)} isShowcaseMode={isShowcaseMode} />;
             case 'outfitAnalysis':
-                return <OutfitAnalysisModule key={key} onBack={handleStartOver} onSave={saveHandler} isShowcaseMode={isShowcaseMode} />;
+                return <OutfitAnalysisModule onBack={handleStartOver} onSave={saveHandler} isShowcaseMode={isShowcaseMode} />;
             case 'portfolio':
-                return <PortfolioModule key={key} onBack={handleStartOver} onSendTo={handleSendToModule} isShowcaseMode={isShowcaseMode} onShowcaseModeChange={setIsShowcaseMode} />;
+                return <PortfolioModule onBack={handleStartOver} onSendTo={handleSendToModule} isShowcaseMode={isShowcaseMode} onShowcaseModeChange={setIsShowcaseMode} />;
             default:
                 if (history.length > 0) {
                     return <MotionDiv key="wizard" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="w-full flex-1 flex flex-col">{renderWizard()}</MotionDiv>;
@@ -1704,6 +1916,7 @@ function App() {
                 activeMode={mode}
                 onSelectMode={handleModeChange}
                 onGoHome={handleStartOver}
+                onOpenSettings={() => setIsSettingsOpen(true)}
                 isShowcaseMode={isShowcaseMode}
             >
                 <div className="w-full">
@@ -1716,6 +1929,23 @@ function App() {
             </Layout>
         );
     }
+
+    const handleClearAll = () => {
+        // This logic can be expanded
+        clearAllPortfolioItems().then(() => {
+            window.dispatchEvent(new CustomEvent('portfolio-updated'));
+            setIsSettingsOpen(false);
+            showNotification('所有作品已清除');
+        });
+    };
+    
+    const handleRestore = (backupData: any) => {
+        addMultiplePortfolioItems(backupData.data).then(() => {
+            window.dispatchEvent(new CustomEvent('portfolio-updated'));
+            setIsSettingsOpen(false);
+            showNotification('作品集已還原');
+        });
+    };
 
     return (
         <main className={cn(
@@ -1739,6 +1969,13 @@ function App() {
                 )}
             </AnimatePresence>
             
+            <SettingsModal
+                isOpen={isSettingsOpen}
+                onClose={() => setIsSettingsOpen(false)}
+                onClearAll={handleClearAll}
+                onRestoreRequest={handleRestore}
+            />
+
             <PortfolioPicker 
                 isOpen={isPortfolioPickerOpen}
                 onClose={() => setIsPortfolioPickerOpen(false)}

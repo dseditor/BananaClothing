@@ -694,7 +694,7 @@ const ImaginativeModule = ({ onBack, onSave, isShowcaseMode, onOpenPortfolioPick
 
     const handleAlchemyImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files) {
-            const files = Array.from(e.target.files).slice(0, 4 - alchemyImages.length);
+            const files = Array.from(e.target.files as FileList).slice(0, 4 - alchemyImages.length);
             files.forEach(file => {
                 const reader = new FileReader();
                 reader.onloadend = () => setAlchemyImages(prev => [...prev, reader.result as string]);

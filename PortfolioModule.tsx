@@ -29,56 +29,6 @@ const formatPortfolioPrompt = (prompt: string): string => {
     return prompt;
 };
 
-const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel, confirmText = '確認', cancelText = '取消', confirmButtonClass = "bg-red-600 hover:bg-red-700 text-white" }: {
-    isOpen: boolean;
-    title: string;
-    message: ReactNode;
-    onConfirm: () => void;
-    onCancel: () => void;
-    confirmText?: string;
-    cancelText?: string;
-    confirmButtonClass?: string;
-}) => {
-    return (
-        <AnimatePresence>
-            {isOpen && (
-                <MotionDiv
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4"
-                    onClick={onCancel}
-                >
-                    <MotionDiv
-                        initial={{ scale: 0.9, y: 20 }}
-                        animate={{ scale: 1, y: 0 }}
-                        exit={{ scale: 0.9, y: 20 }}
-                        onClick={(e) => e.stopPropagation()}
-                        className="bg-[#F8F5F2] rounded-xl shadow-2xl w-full max-w-md p-6 space-y-6"
-                    >
-                        <h3 className="text-2xl font-bold text-[#3D405B]">{title}</h3>
-                        <div className="text-neutral-600">{message}</div>
-                        <div className="flex justify-end gap-4">
-                            <button
-                                onClick={onCancel}
-                                className="px-6 py-2 rounded-lg text-neutral-700 bg-transparent border border-neutral-400 hover:bg-black/5"
-                            >
-                                {cancelText}
-                            </button>
-                            <button
-                                onClick={onConfirm}
-                                className={`px-6 py-2 rounded-lg font-semibold transition-colors ${confirmButtonClass}`}
-                            >
-                                {confirmText}
-                            </button>
-                        </div>
-                    </MotionDiv>
-                </MotionDiv>
-            )}
-        </AnimatePresence>
-    );
-};
-
 const DetailModal = ({ item, onClose, onDelete, onSendTo }: { item: PortfolioItem; onClose: () => void; onDelete: (id: string) => void; onSendTo: (item: PortfolioItem, target: HomepageMode) => void; }) => {
     return (
         <MotionDiv
@@ -126,126 +76,69 @@ const DetailModal = ({ item, onClose, onDelete, onSendTo }: { item: PortfolioIte
     );
 };
 
-const SettingsModal = ({ isOpen, onClose, onClearAll, onRestoreRequest }: { isOpen: boolean; onClose: () => void; onClearAll: () => void; onRestoreRequest: (data: any) => void; }) => {
-    const [storageLimit, setStorageLimit] = useState<number>(() => Number(localStorage.getItem('portfolio_storage_limit_mb') || 200));
-    const [currentUsage, setCurrentUsage] = useState<number>(0);
-    const restoreInputRef = useRef<HTMLInputElement>(null);
-    const neutralButtonClasses = "text-sm text-center text-neutral-700 bg-black/5 border border-neutral-300 py-2 px-4 rounded-md transition-colors duration-200 hover:bg-black/10 disabled:opacity-50";
-
-    useEffect(() => {
-        if (isOpen) {
-            updateUsage();
-        }
-    }, [isOpen]);
-    
-    const updateUsage = async () => {
-        const sizeInBytes = await getPortfolioSize();
-        setCurrentUsage(Number((sizeInBytes / 1024 / 1024).toFixed(2)));
-    };
-
-    const handleLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const newLimit = Number(e.target.value);
-        setStorageLimit(newLimit);
-        localStorage.setItem('portfolio_storage_limit_mb', newLimit.toString());
-    };
-    
-    const handleBackup = async () => {
-        try {
-            const itemsToBackup = await getAllPortfolioItems();
-            const backupData = {
-                timestamp: new Date().toISOString(),
-                data: itemsToBackup,
-            };
-            const jsonString = JSON.stringify(backupData, null, 2);
-            const blob = new Blob([jsonString], { type: 'application/json' });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = `portfolio_backup_${getTimestamp()}.json`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(link.href);
-            alert('備份成功！');
-        } catch (error) {
-            alert('備份失敗。');
-            console.error(error);
-        }
-    };
-    
-    const handleRestore = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const file = event.target.files?.[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-            try {
-                const content = e.target?.result;
-                if (typeof content !== 'string') throw new Error('檔案讀取錯誤');
-                
-                const backupData = JSON.parse(content);
-                if (!backupData.data || !Array.isArray(backupData.data)) {
-                    throw new Error('無效的備份檔案格式。');
-                }
-                
-                onRestoreRequest(backupData);
-            } catch (error) {
-                alert(`還原失敗: ${error instanceof Error ? error.message : '未知錯誤'}`);
-                console.error(error);
-            } finally {
-                if (restoreInputRef.current) restoreInputRef.current.value = '';
-            }
-        };
-        reader.readAsText(file);
-    };
-
+// FIX: Add the missing ConfirmModal component definition.
+const ConfirmModal = ({
+    isOpen,
+    title,
+    message,
+    onConfirm,
+    onCancel,
+    confirmText = '確定',
+    cancelText = '取消',
+    confirmButtonClass = "bg-red-600 hover:bg-red-700 text-white",
+}: {
+    isOpen: boolean;
+    title: string;
+    message: React.ReactNode;
+    onConfirm: () => void;
+    onCancel: () => void;
+    confirmText?: string;
+    cancelText?: string;
+    confirmButtonClass?: string;
+}) => {
     if (!isOpen) return null;
 
-    const usagePercentage = storageLimit > 0 ? (currentUsage / storageLimit) * 100 : 0;
-    
     return (
-        <MotionDiv initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
-            <MotionDiv initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} onClick={e => e.stopPropagation()} className="bg-[#F8F5F2] rounded-xl shadow-2xl w-full max-w-md p-6 space-y-6">
-                <h3 className="text-2xl font-bold text-[#3D405B]">作品集設定</h3>
-                
-                {/* Storage Management */}
-                <div className="space-y-3">
-                    <h4 className="font-semibold text-neutral-700">儲存空間管理</h4>
-                    <label htmlFor="storage-limit" className="block text-sm text-neutral-600">作品集容量上限 (MB)</label>
-                    <input id="storage-limit" type="number" min="50" max="2000" step="50" value={storageLimit} onChange={handleLimitChange} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#E07A5F]" />
-                    <div className="w-full bg-gray-200 rounded-full h-2.5">
-                        <div className="bg-[#E07A5F] h-2.5 rounded-full" style={{ width: `${Math.min(usagePercentage, 100)}%` }}></div>
-                    </div>
-                    <p className="text-sm text-neutral-500 text-right">{currentUsage} MB / {storageLimit} MB</p>
-                    {usagePercentage > 90 && <p className="text-sm text-yellow-600">警告：容量即將用盡。當新增作品超出上限時，將自動從最舊的作品開始刪除。</p>}
-                </div>
-
-                {/* Backup & Restore */}
-                <div className="space-y-3">
-                     <h4 className="font-semibold text-neutral-700">備份與還原</h4>
-                     <div className="grid grid-cols-2 gap-3">
-                         <button onClick={handleBackup} className={neutralButtonClasses + " w-full"}>備份作品集</button>
-                         <button onClick={() => restoreInputRef.current?.click()} className={neutralButtonClasses + " w-full"}>還原作品集</button>
-                         <input type="file" accept=".json" ref={restoreInputRef} onChange={handleRestore} className="hidden" />
-                     </div>
-                </div>
-
-                {/* Danger Zone */}
-                <div className="border-t pt-4 space-y-3">
-                     <h4 className="font-semibold text-red-700">危險區域</h4>
-                     <button onClick={onClearAll} className={dangerButtonClasses + " w-full"}>清除所有作品</button>
+        <MotionDiv
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[101] flex items-center justify-center p-4"
+            onClick={onCancel}
+        >
+            <MotionDiv
+                initial={{ scale: 0.9, y: 20 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.9, y: 20 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-[#F8F5F2] rounded-xl shadow-2xl w-full max-w-sm p-6 text-center"
+            >
+                <h3 className="text-xl font-bold text-[#3D405B]">{title}</h3>
+                <div className="my-4 text-neutral-600">{message}</div>
+                <div className="flex justify-center gap-4 mt-6">
+                    <button
+                        onClick={onCancel}
+                        className="px-6 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 transition-colors"
+                    >
+                        {cancelText}
+                    </button>
+                    <button
+                        onClick={onConfirm}
+                        className={`px-6 py-2 rounded-lg transition-colors ${confirmButtonClass}`}
+                    >
+                        {confirmText}
+                    </button>
                 </div>
             </MotionDiv>
         </MotionDiv>
     );
 };
 
-
 const PortfolioModule = ({ onBack, onSendTo, isShowcaseMode, onShowcaseModeChange }: { onBack: () => void; onSendTo: (item: PortfolioItem, target: HomepageMode) => void; isShowcaseMode: boolean; onShowcaseModeChange: (enabled: boolean) => void; }) => {
     const [items, setItems] = useState<PortfolioItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedItem, setSelectedItem] = useState<PortfolioItem | null>(null);
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
-    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [confirmState, setConfirmState] = useState<{
         isOpen: boolean;
         title: string;
@@ -279,6 +172,7 @@ const PortfolioModule = ({ onBack, onSendTo, isShowcaseMode, onShowcaseModeChang
 
     const filterTabs = useMemo(() => {
         const modes = new Set(items.map(item => item.mode));
+        // @ts-ignore - Type inference issue with translation function
         const sortedModes = Array.from(modes).sort((a, b) => t(a).localeCompare(t(b), 'zh-Hant'));
         return ['all', ...sortedModes];
     }, [items]);
@@ -326,56 +220,6 @@ const PortfolioModule = ({ onBack, onSendTo, isShowcaseMode, onShowcaseModeChang
             },
             confirmText: '確定刪除',
             confirmButtonClass: "bg-red-600 hover:bg-red-700 text-white",
-        });
-    };
-
-    const handleClearAll = async () => {
-        setConfirmState({
-            isOpen: true,
-            title: '清除所有作品',
-            message: '警告：此操作將永久刪除您的所有作品，且無法復原。您確定要繼續嗎？',
-            onConfirm: async () => {
-                hideConfirm();
-                try {
-                    await clearAllPortfolioItems();
-                    setItems([]);
-                    setIsSettingsOpen(false);
-                    alert('所有作品已成功清除。');
-                } catch (error) {
-                     alert('清除作品失敗。');
-                     console.error(error);
-                }
-            },
-            confirmText: '永久刪除',
-            confirmButtonClass: "bg-red-600 hover:bg-red-700 text-white",
-        });
-    };
-
-    const handleRestoreRequest = (backupData: any) => {
-        setConfirmState({
-            isOpen: true,
-            title: '還原作品集',
-            message: (
-                <>
-                    <p>您確定要從以下備份還原嗎？</p>
-                    <p className="font-mono bg-black/5 p-2 rounded-md my-2 text-sm">{new Date(backupData.timestamp).toLocaleString()}</p>
-                    <p>這將會把備份中的作品追加到現有作品集中。</p>
-                </>
-            ),
-            onConfirm: async () => {
-                hideConfirm();
-                try {
-                    await addMultiplePortfolioItems(backupData.data);
-                    alert('還原成功！作品已追加，請重新載入此頁面查看。');
-                    setIsSettingsOpen(false);
-                    loadItems();
-                } catch (error) {
-                    alert(`還原失敗: ${error instanceof Error ? error.message : '未知錯誤'}`);
-                    console.error(error);
-                }
-            },
-            confirmText: '確定還原',
-            confirmButtonClass: "bg-blue-600 hover:bg-blue-700 text-white",
         });
     };
     
@@ -496,9 +340,6 @@ const PortfolioModule = ({ onBack, onSendTo, isShowcaseMode, onShowcaseModeChang
                         <button onClick={toggleShowcaseMode} className={cn(tertiaryButtonClasses, isShowcaseMode && showcaseTertiaryButtonClasses)}>
                             {isShowcaseMode ? '關閉展示模式' : '啟用展示模式'}
                         </button>
-                        <button onClick={() => setIsSettingsOpen(true)} className={cn(tertiaryButtonClasses, isShowcaseMode && showcaseTertiaryButtonClasses)} aria-label="設定">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                        </button>
                     </div>
                 </div>
 
@@ -563,17 +404,17 @@ const PortfolioModule = ({ onBack, onSendTo, isShowcaseMode, onShowcaseModeChang
                                                         onKeyDown={(e) => { if (e.key === 'Enter') handleSaveEdit(item.id); if (e.key === 'Escape') setEditingItemId(null); }}
                                                     />
                                                     <button onClick={() => handleSaveEdit(item.id)} className="p-1.5 bg-green-100 rounded text-green-700 hover:bg-green-200">
-                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                                                     </button>
                                                     <button onClick={() => setEditingItemId(null)} className="p-1.5 bg-gray-200 rounded text-gray-700 hover:bg-gray-300">
-                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                                                     </button>
                                                 </>
                                             ) : (
                                                 <>
                                                     <p className="text-xs text-neutral-600 truncate flex-grow" title={item.prompt}>{formatPortfolioPrompt(item.prompt)}</p>
                                                     <button onClick={() => handleStartEdit(item)} className="p-1.5 bg-black/5 rounded text-gray-600 hover:bg-black/10 flex-shrink-0">
-                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
                                                     </button>
                                                 </>
                                             )}
@@ -588,7 +429,6 @@ const PortfolioModule = ({ onBack, onSendTo, isShowcaseMode, onShowcaseModeChang
             
             <AnimatePresence>
                 {selectedItem && <DetailModal item={selectedItem} onClose={() => setSelectedItem(null)} onDelete={handleDelete} onSendTo={onSendTo} />}
-                <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} onClearAll={handleClearAll} onRestoreRequest={handleRestoreRequest} />
                 {confirmState?.isOpen && (
                     <ConfirmModal
                         isOpen={confirmState.isOpen}

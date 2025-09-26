@@ -297,7 +297,7 @@ const InfinitePhotoshootModule = ({ onBack, onSave, initialImage, onOpenPortfoli
 
     const handleCustomImagesUpload = async (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files) {
-            const files = Array.from(e.target.files).slice(0, 20);
+            const files = Array.from(e.target.files as FileList).slice(0, 20);
             if (files.length < 4) {
                 alert('請至少上傳 4 張圖片。');
                 return;

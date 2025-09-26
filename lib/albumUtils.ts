@@ -669,7 +669,32 @@ const createCoverPage = async (baseImageUrl: string, headlines: { title: string;
     drawImageCover(ctx, baseImage, 0, 0, A4_WIDTH, A4_HEIGHT);
     const preppedImageUrl = canvas.toDataURL('image/jpeg', 0.9);
 
-    const prompt = `Task: Create a professional fashion magazine cover.
+    const selectedModel = localStorage.getItem('image_edit_model') || 'gemini';
+    let prompt = '';
+
+    if (selectedModel === 'fal') {
+        prompt = `任務：創建一張專業的時尚雜誌封面。
+指示：使用提供的圖片作為基礎。藝術性地將以下繁體中文文字整合到封面上，使其看起來像設計的一個內聚部分。你需要決定文字的位置、字體、大小和顏色，以創造一個有影響力和專業外觀的封面。
+
+佈局建議：
+- 雜誌標題「${headlines.title}」通常放置在頂部中央或角落。請選擇一個優雅的字體。
+- 主要標題，如「${headlines.headlines[0] || ''}」，可以用較大的字體放置在畫面的視覺焦點附近，但不要遮擋人物的重要特徵。
+- 其他標題可以以較小的字體放置在側面或底部。
+- 確保文字與背景有足夠的對比度，方便閱讀。
+
+不要只是疊加純系統字體文字，要讓文字融入圖片的風格。
+
+文字內容：
+雜誌標題：「${headlines.title}」
+主要標題：
+- ${headlines.headlines.join('\n- ')}
+
+嚴格要求：
+1. 保持原始人物的臉部和身份。
+2. 保持原始圖片的長寬比（A4直式）。
+3. 最終輸出必須是單一、高品質的圖片。`;
+    } else { // gemini
+        prompt = `Task: Create a professional fashion magazine cover.
 Instructions: Use the provided image as the base. Artistically integrate the following text onto the cover, making it look like a cohesive part of the design (e.g., using varied fonts, sizes, and layouts that complement the image). Do not just overlay plain system font text.
 
 Magazine Title: "${headlines.title.toUpperCase()}"
@@ -680,7 +705,9 @@ Main Headlines:
 Strict Requirements:
 1.  Maintain the original person's face and identity.
 2.  Maintain the original image's aspect ratio (A4 Portrait).
-3.  The final output must be a single, high-quality image.`;
+3.  The final output must be a single, high-quality, image.`;
+    }
+
 
     const generatedCoverUrl = await editImage(preppedImageUrl, prompt, []);
     return generatedCoverUrl;
@@ -845,9 +872,12 @@ const createBackCoverPage = async (
 export async function createPdfAlbumAndDownload(params: PdfAlbumParams): Promise<void> {
     const { coverBaseImage, contentImages, backCoverImages, theme, filename, onProgress, mode, standardModePrompts } = params;
 
+    const selectedModel = localStorage.getItem('image_edit_model') || 'gemini';
+    const headlineLang = selectedModel === 'fal' ? 'zh-Hant' : 'en';
+
     // 1. Generate Magazine Headlines
     onProgress('正在生成封面文字...');
-    const headlines = await generateMagazineHeadlines(theme);
+    const headlines = await generateMagazineHeadlines(theme, headlineLang);
 
     // 2. Create Cover Page
     onProgress('正在製作 AI 藝術封面...');
